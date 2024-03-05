@@ -19,7 +19,7 @@ use crate::score_details::{ScoreDetails, ScoringStrategy};
 use crate::vector::DistributionShift;
 use crate::{
     execute_search, filtered_universe, AscDesc, DefaultSearchLogger, DocumentId, FieldId, Index,
-    Result, SearchContext,
+    Result, SearchContext, TimeBudget,
 };
 
 // Building these factories is not free.
@@ -54,6 +54,8 @@ pub struct Search<'a> {
     index: &'a Index,
     distribution_shift: Option<DistributionShift>,
     embedder_name: Option<String>,
+
+    time_budget: TimeBudget,
 }
 
 impl<'a> Search<'a> {
@@ -75,6 +77,7 @@ impl<'a> Search<'a> {
             index,
             distribution_shift: None,
             embedder_name: None,
+            time_budget: TimeBudget::max(),
         }
     }
 
@@ -154,6 +157,11 @@ impl<'a> Search<'a> {
         self
     }
 
+    pub fn time_budget(&mut self, time_budget: TimeBudget) -> &mut Search<'a> {
+        self.time_budget = time_budget;
+        self
+    }
+
     pub fn execute_for_candidates(&self, has_vector_search: bool) -> Result<RoaringBitmap> {
         if has_vector_search {
             let ctx = SearchContext::new(self.index, self.rtxn);
@@ -180,36 +188,43 @@ impl<'a> Search<'a> {
         }
 
         let universe = filtered_universe(&ctx, &self.filter)?;
-        let PartialSearchResult { located_query_terms, candidates, documents_ids, document_scores } =
-            match self.vector.as_ref() {
-                Some(vector) => execute_vector_search(
-                    &mut ctx,
-                    vector,
-                    self.scoring_strategy,
-                    universe,
-                    &self.sort_criteria,
-                    self.geo_strategy,
-                    self.offset,
-                    self.limit,
-                    self.distribution_shift,
-                    embedder_name,
-                )?,
-                None => execute_search(
-                    &mut ctx,
-                    self.query.as_deref(),
-                    self.terms_matching_strategy,
-                    self.scoring_strategy,
-                    self.exhaustive_number_hits,
-                    universe,
-                    &self.sort_criteria,
-                    self.geo_strategy,
-                    self.offset,
-                    self.limit,
-                    Some(self.words_limit),
-                    &mut DefaultSearchLogger,
-                    &mut DefaultSearchLogger,
-                )?,
-            };
+        let PartialSearchResult {
+            located_query_terms,
+            candidates,
+            documents_ids,
+            document_scores,
+            degraded,
+        } = match self.vector.as_ref() {
+            Some(vector) => execute_vector_search(
+                &mut ctx,
+                vector,
+                self.scoring_strategy,
+                universe,
+                &self.sort_criteria,
+                self.geo_strategy,
+                self.offset,
+                self.limit,
+                self.distribution_shift,
+                embedder_name,
+                self.time_budget,
+            )?,
+            None => execute_search(
+                &mut ctx,
+                self.query.as_deref(),
+                self.terms_matching_strategy,
+                self.scoring_strategy,
+                self.exhaustive_number_hits,
+                universe,
+                &self.sort_criteria,
+                self.geo_strategy,
+                self.offset,
+                self.limit,
+                Some(self.words_limit),
+                &mut DefaultSearchLogger,
+                &mut DefaultSearchLogger,
+                self.time_budget,
+            )?,
+        };
 
         // consume context and located_query_terms to build MatchingWords.
         let matching_words = match located_query_terms {
@@ -217,7 +232,7 @@ impl<'a> Search<'a> {
             None => MatchingWords::default(),
         };
 
-        Ok(SearchResult { matching_words, candidates, document_scores, documents_ids })
+        Ok(SearchResult { matching_words, candidates, document_scores, documents_ids, degraded })
     }
 }
 
@@ -240,6 +255,7 @@ impl fmt::Debug for Search<'_> {
             index: _,
             distribution_shift,
             embedder_name,
+            time_budget,
         } = self;
         f.debug_struct("Search")
             .field("query", query)
@@ -255,6 +271,7 @@ impl fmt::Debug for Search<'_> {
             .field("words_limit", words_limit)
             .field("distribution_shift", distribution_shift)
             .field("embedder_name", embedder_name)
+            .field("time_bduget", time_budget)
             .finish()
     }
 }
@@ -265,6 +282,7 @@ pub struct SearchResult {
     pub candidates: RoaringBitmap,
     pub documents_ids: Vec<DocumentId>,
     pub document_scores: Vec<Vec<ScoreDetails>>,
+    pub degraded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
