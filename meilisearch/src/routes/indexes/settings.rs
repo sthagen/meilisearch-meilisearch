@@ -138,6 +138,7 @@ macro_rules! make_setting_route {
 
                 debug!(returns = ?settings, "Update settings");
                 let mut json = serde_json::json!(&settings);
+                dbg!(&json);
                 let val = json[$camelcase_attr].take();
 
                 Ok(HttpResponse::Ok().json(val))
@@ -624,14 +625,14 @@ fn embedder_analytics(
 }
 
 make_setting_route!(
-    "/search_cutoff",
-    patch,
+    "/search-cutoff",
+    put,
     u64,
     meilisearch_types::deserr::DeserrJsonError<
         meilisearch_types::error::deserr_codes::InvalidSettingsSearchCutoff,
     >,
     search_cutoff,
-    "search_cutoff",
+    "searchCutoff",
     analytics,
     |setting: &Option<u64>, req: &HttpRequest| {
         analytics.publish(
@@ -672,7 +673,8 @@ generate_configure!(
     typo_tolerance,
     pagination,
     faceting,
-    embedders
+    embedders,
+    search_cutoff
 );
 
 pub async fn update_all(
